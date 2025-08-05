@@ -1,0 +1,27 @@
+{
+  "api": {
+    "deepseek_api_key": "your-deepseek-api-key-here",
+    "base_url": "https://api.deepseek.com",
+    "timeout": 60
+  },
+  "generation": {
+    "default_total_conversations": 6000,
+    "default_batch_size": 50,
+    "default_prompt_file": "prompt.txt",
+    "default_output_file": "function_calling_dataset_smart.json",
+    "system_prompt_file": "prompt-2.txt"
+  },
+  "completion": {
+    "default_question_file": "function_calling_dataset_smart.json",
+    "default_output_file": "function_calling_dataset_completed.json",
+    "default_batch_size": 1,
+    "enable_mcp_connection": true,
+    "api_retry_count": 3,
+    "batch_delay_seconds": 3
+  },
+  "system": {
+    "enable_debug": false,
+    "auto_cleanup_temp_files": true,
+    "max_retries": 3
+  }
+}
