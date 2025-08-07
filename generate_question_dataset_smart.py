@@ -220,67 +220,7 @@ class SmartQuestionDatasetGenerator:
         # 解析并返回对话
         conversations = self.utils.extract_json_from_response(response)
         return conversations if conversations else []
-    
-    def _validate_and_filter_conversations(self, conversations: List[Dict], batch_num: int) -> List[Dict]:
-        """验证并过滤对话数据（简化版，不再需要工具推断）"""
-        # 这个方法现在主要用于向后兼容，实际逻辑已移到generate_batch中
-        return conversations
-    
-    def _infer_tool_from_question(self, question: str) -> str:
-        """从问题推断使用的工具（改进版：更精确的匹配逻辑）"""
-        question_lower = question.lower()
-        
-        # 按优先级和特征强度排序的工具关键词
-        tool_patterns = [
-            # 高优先级：特征明显的工具
-            ("batch_get_tx_by_hashes", ["批量交易", "多个交易哈希", "批量查询交易"]),
-            ("get_block_by_hash", ["区块哈希", "通过哈希查区块", "根据哈希查区块"]),
-            ("list_block_txs", ["区块内交易", "区块中的交易", "区块里的交易"]),
-            ("get_native_price_info_by_address", ["btc价格", "原生代币价格", "native价格"]),
-            ("get_token_priceChange_by_address", ["价格变化", "涨跌幅", "价格涨跌"]),
-            ("get_holders_by_address", ["代币持有者", "前十持有者", "top持有者", "holder"]),
-            ("list_address_latest_token_transfers", ["代币转账", "token转移", "代币转移记录"]),
-            ("get_token_onChain_data_by_address", ["链上数据", "交易量数据", "代币交易量"]),
-            ("list_recent_txs_num_by_address", ["交易数量", "交易次数统计", "交易笔数"]),
-            
-            # 中优先级：常见功能
-            ("list_address_latest_txs", ["交易记录", "最近交易", "交易历史", "转账记录"]),
-            ("get_tx_by_hash", ["交易哈希", "交易详情", "查询交易", "transaction"]),
-            ("query_asset_value_by_address", ["总资产", "资产价值", "资产总值"]),
-            ("query_token_holding_by_address", ["持仓分析", "代币持仓", "持有分布"]),
-            ("get_block_by_number", ["区块号", "区块详情", "第几个区块"]),
-            ("list_latest_blocks", ["最新区块", "最近区块", "新区块"]),
-            ("search_chain_data", ["搜索", "查找代币", "寻找"]),
-            ("get_token_info_by_address", ["代币信息", "token信息", "币种详情"]),
-            
-            # 低优先级：通用特征（容易误判）
-            ("get_address_details_by_address", ["地址详情", "钱包详情", "地址信息", "余额"])
-        ]
-        
-        # 按优先级匹配
-        for tool, keywords in tool_patterns:
-            if any(keyword in question_lower for keyword in keywords):
-                return tool
-        
-        # 如果没有匹配到，使用模糊匹配
-        if "交易" in question_lower:
-            if "记录" in question_lower or "历史" in question_lower:
-                return "list_address_latest_txs"
-            elif "哈希" in question_lower:
-                return "get_tx_by_hash"
-            else:
-                return "list_latest_txs"
-        
-        if "地址" in question_lower:
-            if "资产" in question_lower or "价值" in question_lower:
-                return "query_asset_value_by_address"
-            else:
-                return "get_address_details_by_address"
-        
-        if "代币" in question_lower or "token" in question_lower:
-            return "get_token_info_by_address"
-        
-        return "unknown"
+
     
     def _infer_user_role(self, question: str) -> str:
         """推断用户角色"""
