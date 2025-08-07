@@ -239,79 +239,183 @@ MCP工具调用结果: {observation_data}
         # 获取MCP工具schema
         tools_schema = await self._get_mcp_tools_schema()
         
+        # 检查并发配置
+        enable_parallel = self.config.get('completion.enable_parallel_completion', True)
+        max_concurrent = self.config.get('completion.max_concurrent_completions', 2)
+        function_call_timeout = self.config.get('completion.function_call_timeout', 30)
+        
         completed_conversations = []
         
+        # 预处理：过滤出需要补全的对话
+        items_to_complete = []
         for i, item in enumerate(question_data):
-            try:
-                conversations = item.get("conversations", [])
-                if not conversations:
-                    logger.warning(f"第 {i+1} 个对话缺少conversations字段")
+            conversations = item.get("conversations", [])
+            if not conversations:
+                logger.warning(f"第 {i+1} 个对话缺少conversations字段")
+                continue
+                
+            # 检查是否已经完整
+            has_assistant = any(conv.get("from") in ["assistant", "gpt"] for conv in conversations)
+            if has_assistant:
+                logger.info(f"第 {i+1} 个对话已完整，跳过")
+                completed_conversations.append(item)
+                continue
+            
+            items_to_complete.append((i, item))
+        
+        if not items_to_complete:
+            logger.info("所有对话都已完整，无需补全")
+            return completed_conversations
+        
+        if enable_parallel and len(items_to_complete) > 1:
+            # 并行处理模式
+            logger.info(f"🚀 启用并行补全，最大并发数: {max_concurrent}")
+            
+            semaphore = asyncio.Semaphore(max_concurrent)
+            
+            async def complete_single_conversation(index_item_pair):
+                i, item = index_item_pair
+                async with semaphore:
+                    try:
+                        conversations = item.get("conversations", [])
+                        
+                        # 提取用户问题用于日志
+                        user_question = ""
+                        for conv in conversations:
+                            if conv.get("from") == "user":
+                                user_question = conv.get("value", "")[:100] + "..." if len(conv.get("value", "")) > 100 else conv.get("value", "")
+                                break
+                        
+                        logger.info(f"[并行] 正在补全对话 {i+1}/{len(question_data)}: {user_question}")
+                        
+                        # 构建消息格式
+                        messages = [{"role": "system", "content": self.system_prompt}]
+                        for conv in conversations:
+                            role = conv.get("from", "")
+                            content = conv.get("value", "")
+                            if role == "user":
+                                messages.append({"role": "user", "content": content})
+                            elif role == "system":
+                                messages.append({"role": "system", "content": content})
+                        
+                        # 使用timeout控制function calling
+                        try:
+                            result = await asyncio.wait_for(
+                                self.api_client.generate_complete_conversation(
+                                    messages=messages,
+                                    tools_schema=tools_schema,
+                                    mcp_client=self.mcp_client
+                                ),
+                                timeout=function_call_timeout
+                            )
+                        except asyncio.TimeoutError:
+                            logger.error(f"[并行] 对话 {i+1} function calling超时")
+                            return None
+                        
+                        if result and result.get("new_messages"):
+                            # 统一角色名称（user -> human）
+                            for conv in conversations:
+                                if conv.get("from") == "user":
+                                    conv["from"] = "human"
+                            
+                            # 添加新消息
+                            conversations.extend(result["new_messages"])
+                            
+                            completed_conversation = {
+                                "conversations": conversations,
+                                "tools": result.get("tools_used_json", "[]")
+                            }
+                            
+                            logger.info(f"[并行] 成功补全对话 {i+1}/{len(question_data)}")
+                            return completed_conversation
+                        else:
+                            logger.error(f"[并行] 对话 {i+1} function calling失败")
+                            return None
+                            
+                    except Exception as e:
+                        logger.error(f"[并行] 补全对话 {i+1} 时出错: {e}")
+                        return None
+            
+            # 创建并发任务
+            tasks = [complete_single_conversation(item_pair) for item_pair in items_to_complete]
+            
+            # 等待所有任务完成
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # 处理结果
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error(f"[并行] 任务执行异常: {result}")
                     continue
-                
-                # 检查是否已经完整（有assistant响应）
-                has_assistant = any(conv.get("from") in ["assistant", "gpt"] for conv in conversations)
-                if has_assistant:
-                    logger.info(f"第 {i+1} 个对话已完整，跳过")
-                    completed_conversations.append(item)
-                    continue
-                
-                # 提取用户问题用于日志
-                user_question = ""
-                for conv in conversations:
-                    if conv.get("from") == "user":
-                        user_question = conv.get("value", "")[:100] + "..." if len(conv.get("value", "")) > 100 else conv.get("value", "")
-                        break
-                
-                logger.info(f"正在补全对话 {i+1}/{len(question_data)}: {user_question}")
-                
-                # 构建用于function calling的消息格式
-                messages = [{"role": "system", "content": self.system_prompt}]
-                for conv in conversations:
-                    role = conv.get("from", "")
-                    content = conv.get("value", "")
-                    if role == "user":
-                        messages.append({"role": "user", "content": content})
-                    elif role == "system":
-                        messages.append({"role": "system", "content": content})
-                
-                # 使用真实的function calling生成完整对话
-                result = await self.api_client.generate_complete_conversation(
-                    messages=messages,
-                    tools_schema=tools_schema,
-                    mcp_client=self.mcp_client
-                )
-                
-                if result and result.get("new_messages"):
-                    # 统一角色名称（user -> human）
+                if result:
+                    completed_conversations.append(result)
+                    
+        else:
+            # 串行处理模式
+            logger.info("📝 使用串行补全模式")
+            
+            for i, item in items_to_complete:
+                try:
+                    conversations = item.get("conversations", [])
+                    
+                    # 提取用户问题用于日志
+                    user_question = ""
                     for conv in conversations:
                         if conv.get("from") == "user":
-                            conv["from"] = "human"
+                            user_question = conv.get("value", "")[:100] + "..." if len(conv.get("value", "")) > 100 else conv.get("value", "")
+                            break
                     
-                    # 添加所有新生成的消息到对话中
-                    conversations.extend(result["new_messages"])
+                    logger.info(f"正在补全对话 {i+1}/{len(question_data)}: {user_question}")
                     
-                    # 创建完整的对话对象，包含tools定义
-                    completed_conversation = {
-                        "conversations": conversations,
-                        "tools": result.get("tools_used_json", "[]")
-                    }
+                    # 构建用于function calling的消息格式
+                    messages = [{"role": "system", "content": self.system_prompt}]
+                    for conv in conversations:
+                        role = conv.get("from", "")
+                        content = conv.get("value", "")
+                        if role == "user":
+                            messages.append({"role": "user", "content": content})
+                        elif role == "system":
+                            messages.append({"role": "system", "content": content})
                     
-                    completed_conversations.append(completed_conversation)
-                    logger.info(f"成功补全对话 {i+1}/{len(question_data)}，使用了工具调用")
-                else:
-                    logger.error(f"对话 {i+1} function calling失败，跳过")
-                
-                # 避免API限流
-                if (i + 1) % 5 == 0:
-                    logger.info("暂停1秒避免API限流")
-                    await asyncio.sleep(1)
+                    # 使用真实的function calling生成完整对话
+                    result = await self.api_client.generate_complete_conversation(
+                        messages=messages,
+                        tools_schema=tools_schema,
+                        mcp_client=self.mcp_client
+                    )
                     
-            except Exception as e:
-                logger.error(f"补全对话 {i+1} 时出错: {e}")
-                continue
+                    if result and result.get("new_messages"):
+                        # 统一角色名称（user -> human）
+                        for conv in conversations:
+                            if conv.get("from") == "user":
+                                conv["from"] = "human"
+                        
+                        # 添加所有新生成的消息到对话中
+                        conversations.extend(result["new_messages"])
+                        
+                        # 创建完整的对话对象，包含tools定义
+                        completed_conversation = {
+                            "conversations": conversations,
+                            "tools": result.get("tools_used_json", "[]")
+                        }
+                        
+                        completed_conversations.append(completed_conversation)
+                        logger.info(f"成功补全对话 {i+1}/{len(question_data)}，使用了工具调用")
+                    else:
+                        logger.error(f"对话 {i+1} function calling失败，跳过")
+                    
+                    # 避免API限流
+                    if (i + 1) % 5 == 0:
+                        logger.info("暂停1秒避免API限流")
+                        await asyncio.sleep(1)
+                        
+                except Exception as e:
+                    logger.error(f"补全对话 {i+1} 时出错: {e}")
+                    continue
         
+        processing_mode = "并行" if enable_parallel and len(items_to_complete) > 1 else "串行"
         success_rate = len(completed_conversations) / len(question_data) * 100 if question_data else 0
-        logger.info(f"第 {batch_num} 批补全完成: {len(completed_conversations)}/{len(question_data)} (成功率: {success_rate:.1f}%)")
+        logger.info(f"第 {batch_num} 批补全完成: {len(completed_conversations)}/{len(question_data)} (成功率: {success_rate:.1f}%, {processing_mode}处理)")
         return completed_conversations
 
     async def generate_complete_dataset(self, question_file: str, output_file: str = "function_calling_dataset_completed.json", batch_size: int = 1):

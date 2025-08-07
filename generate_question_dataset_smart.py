@@ -70,67 +70,6 @@ class SmartQuestionDatasetGenerator:
         """手动触发清理（模拟defer调用）"""
         self._emergency_cleanup()
         
-    def _get_dynamic_prompt_variation(self, batch_num: int, batch_size: int) -> str:
-        """基于去重管理器生成动态prompt变体"""
-        
-        # 获取当前优先工具分配
-        batch_allocation = self.dedup_manager._get_priority_tools(batch_size)
-        
-        if not batch_allocation:
-            # 所有工具都完成了，生成平衡的问题
-            return f"生成{batch_size}个问题，平均分布到各个工具类型"
-        
-        # 根据优先工具生成针对性的prompt
-        priority_descriptions = []
-        for tool, allocation in batch_allocation[:3]:  # 取前3个优先工具
-            tool_desc = self._get_tool_description(tool)
-            if tool_desc:
-                priority_descriptions.append(f"{tool_desc}({allocation}个)")
-        
-        if priority_descriptions:
-            return f"重点生成以下类型的问题：{', '.join(priority_descriptions)}。总共{batch_size}个问题"
-        else:
-            # 回退到原有的轮询方式
-            return self._get_fallback_prompt_variation(batch_num, batch_size)
-    
-    def _get_tool_description(self, tool_name: str) -> str:
-        """获取工具的中文描述"""
-        tool_descriptions = {
-            "get_address_details_by_address": "钱包地址详情查询",
-            "get_token_info_by_address": "代币信息查询",
-            "list_address_latest_txs": "地址最新交易记录",
-            "get_tx_by_hash": "交易详情查询",
-            "search_chain_data": "链上数据搜索",
-            "query_asset_value_by_address": "地址资产价值查询",
-            "query_token_holding_by_address": "地址持仓分析",
-            "get_block_by_number": "区块详情查询",
-            "list_latest_blocks": "最新区块查询",
-            "get_token_priceChange_by_address": "代币价格变化查询",
-            "list_address_latest_token_transfers": "代币转账记录",
-            "get_holders_by_address": "代币持有者查询",
-            "batch_get_tx_by_hashes": "批量交易查询",
-            "list_block_txs": "区块内交易查询",
-            "get_native_price_info_by_address": "原生代币价格查询",
-            "get_token_onChain_data_by_address": "代币链上数据",
-            "list_recent_txs_num_by_address": "地址交易数量统计",
-            "get_block_by_hash": "区块哈希查询",
-            "list_latest_txs": "最新交易列表",
-        }
-        return tool_descriptions.get(tool_name, "")
-    
-    def _get_fallback_prompt_variation(self, batch_num: int, batch_size: int) -> str:
-        """原有的prompt变体作为回退方案"""
-        prompt_variations = [
-            f"生成{batch_size}个问题，问题属于以下主题：查询交易详情、获取区块交易、最新交易场景",
-            f"生成{batch_size}个问题: 问题属于以下主题：钱包余额、地址详情、资产价值、持仓分析场景",
-            f"生成{batch_size}个问题: 问题属于以下主题：代币价格、市场数据、价格变化、交易量场景",
-            f"生成{batch_size}个问题: 问题属于以下主题：区块详情、最新区块、区块内交易等场景",
-            f"生成{batch_size}个问题: 问题属于以下主题：代币持有者、转账记录、资产分布场景",
-            f"生成{batch_size}个问题: 问题属于以下主题：链上搜索、代币查找、地址搜索场景",
-            f"生成{batch_size}个问题: 问题属于以下主题：BTC价格、原生代币信息、实时价格场景",
-            f"生成{batch_size}个问题: 问题属于以下主题：混合查询，涵盖交易、地址、代币场景"
-        ]
-        return prompt_variations[batch_num % len(prompt_variations)]
 
     async def generate_batch(self, base_system_prompt: str, batch_num: int, batch_size: int = 10) -> List[Dict]:
         """生成一批对话数据（集成去重逻辑）"""
@@ -142,37 +81,98 @@ class SmartQuestionDatasetGenerator:
             print(f"所有工具已完成目标，跳过批次 {batch_num}")
             return []
         
-        # 按工具分别生成
-        batch_conversations = []
-        for tool_name, target_count in tool_allocation:
-            if target_count <= 0:
-                continue
-                
-            print(f"  🎯 正在生成 {tool_name} 的 {target_count} 个问题...")
-            
-            # 为特定工具生成对话
-            tool_conversations = await self._generate_for_specific_tool(
-                base_system_prompt, tool_name, target_count, batch_num
-            )
-            
-            # 直接更新状态（不需要推断）
-            for conv_data in tool_conversations:
-                conversations_list = conv_data.get("conversations", [])
-                user_question = self._extract_user_question(conversations_list)
-                
-                if user_question and not self.dedup_manager.check_duplicate(user_question):
-                    # 直接使用已知的工具名更新状态
-                    user_role = self._infer_user_role(user_question)
-                    language_style = self._infer_language_style(user_question)
-                    
-                    self.dedup_manager.record_generated(
-                        conversations_list, tool_name, user_role, language_style
-                    )
-                    
-                    batch_conversations.append(conv_data)
-                    print(f"    ✅ 记录: {tool_name} - {user_question[:50]}...")
+        # 检查是否启用并行生成
+        enable_parallel = self.config.get('generation.enable_parallel_generation', True)
+        max_concurrent = self.config.get('generation.max_concurrent_tools', 3)
+        parallel_delay = self.config.get('generation.parallel_batch_delay', 0.5)
         
-        print(f"第 {batch_num} 批成功生成 {len(batch_conversations)} 个对话")
+        batch_conversations = []
+        
+        if enable_parallel and len(tool_allocation) > 1:
+            # 并行处理模式
+            print(f"  🚀 启用并行处理，最大并发数: {max_concurrent}")
+            
+            # 使用信号量控制并发数量
+            semaphore = asyncio.Semaphore(max_concurrent)
+            
+            async def process_tool_with_semaphore(tool_name: str, target_count: int):
+                async with semaphore:
+                    print(f"  🎯 [并行] 正在生成 {tool_name} 的 {target_count} 个问题...")
+                    try:
+                        result = await self._generate_for_specific_tool(
+                            base_system_prompt, tool_name, target_count, batch_num
+                        )
+                        if parallel_delay > 0:
+                            await asyncio.sleep(parallel_delay)
+                        return tool_name, result
+                    except Exception as e:
+                        print(f"  ❌ [并行] 生成 {tool_name} 失败: {e}")
+                        return tool_name, []
+            
+            # 创建并发任务
+            tasks = []
+            for tool_name, target_count in tool_allocation:
+                if target_count > 0:
+                    task = process_tool_with_semaphore(tool_name, target_count)
+                    tasks.append(task)
+            
+            # 等待所有任务完成
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # 处理结果
+            for result in results:
+                if isinstance(result, Exception):
+                    print(f"  ❌ [并行] 任务执行异常: {result}")
+                    continue
+                
+                tool_name, tool_conversations = result
+                for conv_data in tool_conversations:
+                    conversations_list = conv_data.get("conversations", [])
+                    user_question = self._extract_user_question(conversations_list)
+                    
+                    if user_question and not self.dedup_manager.check_duplicate(user_question):
+                        user_role = self._infer_user_role(user_question)
+                        language_style = self._infer_language_style(user_question)
+                        
+                        self.dedup_manager.record_generated(
+                            conversations_list, tool_name, user_role, language_style
+                        )
+                        
+                        batch_conversations.append(conv_data)
+                        print(f"    ✅ [并行] 记录: {tool_name} - {user_question[:50]}...")
+        else:
+            # 串行处理模式
+            print(f"  📝 使用串行处理模式")
+            for tool_name, target_count in tool_allocation:
+                if target_count <= 0:
+                    continue
+                    
+                print(f"  🎯 正在生成 {tool_name} 的 {target_count} 个问题...")
+                
+                # 为特定工具生成对话
+                tool_conversations = await self._generate_for_specific_tool(
+                    base_system_prompt, tool_name, target_count, batch_num
+                )
+                
+                # 直接更新状态（不需要推断）
+                for conv_data in tool_conversations:
+                    conversations_list = conv_data.get("conversations", [])
+                    user_question = self._extract_user_question(conversations_list)
+                    
+                    if user_question and not self.dedup_manager.check_duplicate(user_question):
+                        # 直接使用已知的工具名更新状态
+                        user_role = self._infer_user_role(user_question)
+                        language_style = self._infer_language_style(user_question)
+                        
+                        self.dedup_manager.record_generated(
+                            conversations_list, tool_name, user_role, language_style
+                        )
+                        
+                        batch_conversations.append(conv_data)
+                        print(f"    ✅ 记录: {tool_name} - {user_question[:50]}...")
+        
+        processing_mode = "并行" if enable_parallel and len(tool_allocation) > 1 else "串行"
+        print(f"第 {batch_num} 批成功生成 {len(batch_conversations)} 个对话 ({processing_mode}处理)")
         return batch_conversations
     
     def _extract_user_question(self, conversations_list: List[Dict]) -> str:

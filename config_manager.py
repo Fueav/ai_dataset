@@ -44,7 +44,22 @@ class ConfigManager:
                 "default_total_conversations": 6000,
                 "default_batch_size": 50,
                 "default_prompt_file": "prompt.txt",
-                "default_output_file": "function_calling_dataset_smart.json"
+                "default_output_file": "function_calling_dataset_smart.json",
+                "system_prompt_file": "prompt-2.txt",
+                "max_concurrent_tools": 3,
+                "enable_parallel_generation": true,
+                "parallel_batch_delay": 0.5
+            },
+            "completion": {
+                "default_question_file": "function_calling_dataset_smart.json",
+                "default_output_file": "function_calling_dataset_completed.json",
+                "default_batch_size": 1,
+                "enable_mcp_connection": True,
+                "api_retry_count": 3,
+                "batch_delay_seconds": 3,
+                "max_concurrent_completions": 2,
+                "enable_parallel_completion": True,
+                "function_call_timeout": 30
             },
             "system": {
                 "enable_debug": False,
