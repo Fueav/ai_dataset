@@ -8,13 +8,14 @@
     "default_total_conversations": 6000,
     "default_batch_size": 50,
     "default_prompt_file": "prompt.txt",
-    "default_output_file": "function_calling_dataset_smart.json",
-    "system_prompt_file": "prompt-2.txt"
+    "default_output_file": "function_calling_dataset_smart.json"
   },
   "completion": {
     "default_question_file": "function_calling_dataset_smart.json",
     "default_output_file": "function_calling_dataset_completed.json",
     "default_batch_size": 1,
+    "default_start_from": 0,
+    "system_prompt_file": "prompt-2.txt",
     "enable_mcp_connection": true,
     "api_retry_count": 3,
     "batch_delay_seconds": 3

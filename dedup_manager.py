@@ -12,32 +12,36 @@ import re
 
 
 class DatasetDedupManager:
-    def __init__(self, config_file: str = "generation_state.json"):
+    def __init__(self, config_file: str = "generation_state.json", total_conversations: int = 6000):
         self.config_file = config_file
+        self.total_conversations = total_conversations
         self.state = self._load_state()
         
-        # 工具分布配置（基于prompt.txt）
-        self.tool_targets = {
-            "get_address_details_by_address": 600,
-            "get_token_info_by_address": 480,
-            "list_address_latest_txs": 480,
-            "get_tx_by_hash": 420,
-            "search_chain_data": 420,
-            "query_asset_value_by_address": 300,
-            "query_token_holding_by_address": 300,
-            "get_block_by_number": 300,
-            "list_latest_blocks": 300,
-            "get_token_priceChange_by_address": 300,
-            "list_address_latest_token_transfers": 300,
-            "get_holders_by_address": 300,
-            "batch_get_tx_by_hashes": 180,
-            "list_block_txs": 180,
-            "get_native_price_info_by_address": 180,
-            "get_token_onChain_data_by_address": 180,
-            "list_recent_txs_num_by_address": 180,
-            "get_block_by_hash": 180,
-            "list_latest_txs": 240,
+        # 工具分布比例配置（基于prompt.txt的原始6000分布）
+        self.tool_ratios = {
+            "get_address_details_by_address": 0.10,    # 600/6000
+            "get_token_info_by_address": 0.08,        # 480/6000
+            "list_address_latest_txs": 0.08,          # 480/6000
+            "get_tx_by_hash": 0.07,                   # 420/6000
+            "search_chain_data": 0.07,                # 420/6000
+            "query_asset_value_by_address": 0.05,     # 300/6000
+            "query_token_holding_by_address": 0.05,   # 300/6000
+            "get_block_by_number": 0.05,              # 300/6000
+            "list_latest_blocks": 0.05,               # 300/6000
+            "get_token_priceChange_by_address": 0.05, # 300/6000
+            "list_address_latest_token_transfers": 0.05, # 300/6000
+            "get_holders_by_address": 0.05,           # 300/6000
+            "batch_get_tx_by_hashes": 0.03,           # 180/6000
+            "list_block_txs": 0.03,                   # 180/6000
+            "get_native_price_info_by_address": 0.03, # 180/6000
+            "get_token_onChain_data_by_address": 0.03, # 180/6000
+            "list_recent_txs_num_by_address": 0.03,   # 180/6000
+            "get_block_by_hash": 0.03,                # 180/6000
+            "list_latest_txs": 0.04,                  # 240/6000
         }
+        
+        # 根据总对话数动态计算工具目标
+        self.tool_targets = self._calculate_tool_targets()
         
         # 用户角色分布
         self.user_roles = {
@@ -137,7 +141,7 @@ class DatasetDedupManager:
 基于以下进度和约束生成本批次数据：
 
 【当前进度】
-- 总完成: {self.state['total_generated']}/6000 ({progress_info['completion_rate']:.1%})
+- 总完成: {self.state['total_generated']}/{self.total_conversations} ({progress_info['completion_rate']:.1%})
 - 本批次目标: {batch_size}条
 
 【本批次重点工具】（优先生成以下工具的问题）
@@ -165,8 +169,7 @@ class DatasetDedupManager:
 
     def _analyze_progress(self) -> Dict:
         """分析当前生成进度"""
-        total_target = sum(self.tool_targets.values())
-        completion_rate = self.state['total_generated'] / total_target
+        completion_rate = self.state['total_generated'] / self.total_conversations
         
         return {
             "completion_rate": completion_rate,
@@ -230,6 +233,21 @@ class DatasetDedupManager:
             guide += f"- {style}: {target}条 (当前总数: {current})\n"
             
         return guide
+    
+    def _calculate_tool_targets(self) -> Dict[str, int]:
+        """根据总对话数动态计算各工具的目标数量"""
+        targets = {}
+        for tool, ratio in self.tool_ratios.items():
+            targets[tool] = int(self.total_conversations * ratio)
+        
+        # 确保总数正确（处理舍入误差）
+        current_total = sum(targets.values())
+        if current_total != self.total_conversations:
+            # 将差值分配给第一个工具
+            first_tool = list(targets.keys())[0]
+            targets[first_tool] += self.total_conversations - current_total
+        
+        return targets
 
     def _format_priority_tools(self, priority_tools: List) -> str:
         """格式化优先工具信息"""
@@ -288,8 +306,8 @@ class DatasetDedupManager:
     def get_statistics(self) -> Dict:
         """获取统计信息"""
         stats = {
-            "总进度": f"{self.state['total_generated']}/6000",
-            "完成率": f"{self.state['total_generated']/6000*100:.1f}%",
+            "总进度": f"{self.state['total_generated']}/{self.total_conversations}",
+            "完成率": f"{self.state['total_generated']/self.total_conversations*100:.1f}%",
             "工具进度": {},
             "角色分布": dict(self.state["role_count"]),
             "风格分布": dict(self.state["style_count"]),
@@ -307,10 +325,12 @@ class DatasetDedupManager:
 
 # 使用示例
 if __name__ == "__main__":
-    manager = DatasetDedupManager()
+    # 测试不同的total_conversations配置
+    print("=== 测试 100 个对话的配置 ===")
+    manager = DatasetDedupManager(total_conversations=100)
     
     # 获取下一批次的动态prompt
-    batch_prompt = manager.get_next_batch_prompt(50)
+    batch_prompt = manager.get_next_batch_prompt(10)
     print("=== 下一批次动态Prompt ===")
     print(batch_prompt)
     
@@ -319,3 +339,7 @@ if __name__ == "__main__":
     print("\n=== 当前统计 ===")
     for key, value in stats.items():
         print(f"{key}: {value}")
+    
+    print("\n=== 工具目标分配 ===")
+    for tool, target in list(manager.tool_targets.items())[:5]:
+        print(f"{tool}: {target}")

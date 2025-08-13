@@ -9,6 +9,8 @@ import json
 import logging
 import re
 import time
+import signal
+import os
 from typing import List, Dict, Any
 from deepseek_api_client import DeepSeekAPIClient
 from dataset_utils import DatasetUtils
@@ -41,7 +43,7 @@ class CompleteDatasetGenerator:
         self.mcp_client = MerlinMCPClient()
         
         # 从配置获取系统提示词文件
-        prompt_file = self.config.get('generation.system_prompt_file', 'prompt-2.txt')
+        prompt_file = self.config.get('completion.system_prompt_file', 'prompt-2.txt')
         self.system_prompt = self._load_system_prompt(prompt_file)
         logger.info("CompleteDatasetGenerator 初始化完成")
     
@@ -232,6 +234,112 @@ MCP工具调用结果: {observation_data}
             logger.error(f"生成工具JSON失败: {e}")
             return "[]"
 
+    async def _handle_interruption(self, all_completed: List[Dict], temp_files: List[str], output_file: str, start_from: int):
+        """处理程序中断，合并临时文件并以增量形式保存到默认输出文件"""
+        try:
+            logger.info("正在处理程序中断...")
+            
+            # 只合并临时文件中的数据，忽略内存中的数据
+            temp_data = []
+            for temp_file in temp_files:
+                if os.path.exists(temp_file):
+                    try:
+                        temp_content = self.utils.load_json_file(temp_file)
+                        if temp_content:
+                            temp_data.extend(temp_content)
+                            logger.info(f"已加载临时文件: {temp_file}, {len(temp_content)} 条记录")
+                    except Exception as e:
+                        logger.error(f"加载临时文件 {temp_file} 失败: {e}")
+            
+            if temp_data:
+                # 读取现有输出文件的数据（如果存在）
+                existing_data = []
+                if os.path.exists(output_file):
+                    try:
+                        existing_data = self.utils.load_json_file(output_file)
+                        if existing_data:
+                            logger.info(f"已读取现有输出文件: {output_file}, {len(existing_data)} 条记录")
+                    except Exception as e:
+                        logger.warning(f"读取现有输出文件失败: {e}")
+                
+                # 合并数据：现有数据 + 临时文件数据
+                final_data = existing_data + temp_data
+                
+                # 保存到默认输出文件
+                self.utils.write_json_file(final_data, output_file)
+                logger.info(f"💾 程序中断，已将 {len(temp_data)} 个临时文件记录合并到: {output_file}")
+                logger.info(f"📊 输出文件现有记录数: {len(final_data)} (原有 {len(existing_data)} + 新增 {len(temp_data)})")
+                
+                # 计算继续处理的建议起始位置
+                next_start_from = start_from + len(temp_data)
+                logger.info(f"💡 建议续传参数: --start_from {next_start_from}")
+                print(f"💾 程序中断，已保存 {len(temp_data)} 个对话到: {output_file}")
+                print(f"📊 输出文件总记录数: {len(final_data)}")
+                print(f"💡 续传命令: python generate_complete_dataset.py --start_from {next_start_from}")
+            else:
+                logger.info("没有临时文件数据需要合并")
+                print("没有需要保存的临时数据")
+            
+            # 清理临时文件
+            await self._cleanup_temp_files(temp_files)
+            
+            # 断开MCP连接
+            try:
+                await self.mcp_client.disconnect()
+                logger.info("已断开MCP服务器连接")
+            except Exception as e:
+                logger.warning(f"断开MCP连接时出错: {e}")
+                
+        except Exception as e:
+            logger.error(f"处理程序中断时出错: {e}")
+
+    async def _cleanup_temp_files(self, temp_files: List[str]):
+        """清理临时文件"""
+        try:
+            cleanup_count = 0
+            for temp_file in temp_files:
+                if os.path.exists(temp_file):
+                    try:
+                        os.remove(temp_file)
+                        cleanup_count += 1
+                        logger.debug(f"已删除临时文件: {temp_file}")
+                    except Exception as e:
+                        logger.warning(f"删除临时文件 {temp_file} 失败: {e}")
+            
+            if cleanup_count > 0:
+                logger.info(f"🧹 已清理 {cleanup_count} 个临时文件")
+                
+        except Exception as e:
+            logger.error(f"清理临时文件时出错: {e}")
+
+    async def _save_results_incrementally(self, new_data: List[Dict], output_file: str):
+        """以增量方式保存结果，不覆盖现有数据"""
+        try:
+            if not new_data:
+                logger.info("没有新数据需要保存")
+                return
+            
+            # 读取现有输出文件的数据（如果存在）
+            existing_data = []
+            if os.path.exists(output_file):
+                try:
+                    existing_data = self.utils.load_json_file(output_file)
+                    if existing_data:
+                        logger.info(f"已读取现有输出文件: {output_file}, {len(existing_data)} 条记录")
+                except Exception as e:
+                    logger.warning(f"读取现有输出文件失败: {e}")
+            
+            # 合并数据：现有数据 + 新数据
+            final_data = existing_data + new_data
+            
+            # 保存到输出文件
+            self.utils.write_json_file(final_data, output_file)
+            logger.info(f"💾 已将 {len(new_data)} 个新记录追加到: {output_file}")
+            logger.info(f"📊 输出文件现有记录数: {len(final_data)} (原有 {len(existing_data)} + 新增 {len(new_data)})")
+            
+        except Exception as e:
+            logger.error(f"增量保存结果时出错: {e}")
+
     async def complete_batch(self, question_data: List[Dict], batch_num: int) -> List[Dict]:
         """补全一批对话数据，使用真实的function calling"""
         logger.info(f"开始补全第 {batch_num} 批数据，共 {len(question_data)} 个对话")
@@ -255,8 +363,14 @@ MCP工具调用结果: {observation_data}
                 continue
                 
             # 检查是否已经完整
-            has_assistant = any(conv.get("from") in ["assistant", "gpt"] for conv in conversations)
-            if has_assistant:
+            def is_conversation_complete(conversations):
+                """检查对话是否真正完整"""
+                message_types = [conv.get("from") for conv in conversations]
+                
+                # 对于function calling数据集，必须包含gpt的最终回复
+                return "gpt" in message_types
+            
+            if is_conversation_complete(conversations):
                 logger.info(f"第 {i+1} 个对话已完整，跳过")
                 completed_conversations.append(item)
                 continue
@@ -376,7 +490,10 @@ MCP工具调用结果: {observation_data}
                             messages.append({"role": "user", "content": content})
                         elif role == "system":
                             messages.append({"role": "system", "content": content})
-                    
+                        elif role == "assistant":
+                            messages.append({"role": "assistant", "content": content})
+
+
                     # 使用真实的function calling生成完整对话
                     result = await self.api_client.generate_complete_conversation(
                         messages=messages,
@@ -392,7 +509,6 @@ MCP工具调用结果: {observation_data}
                         
                         # 添加所有新生成的消息到对话中
                         conversations.extend(result["new_messages"])
-                        
                         # 创建完整的对话对象，包含tools定义
                         completed_conversation = {
                             "conversations": conversations,
@@ -418,7 +534,7 @@ MCP工具调用结果: {observation_data}
         logger.info(f"第 {batch_num} 批补全完成: {len(completed_conversations)}/{len(question_data)} (成功率: {success_rate:.1f}%, {processing_mode}处理)")
         return completed_conversations
 
-    async def generate_complete_dataset(self, question_file: str, output_file: str = "function_calling_dataset_completed.json", batch_size: int = 1):
+    async def generate_complete_dataset(self, question_file: str, output_file: str = "function_calling_dataset_completed.json", batch_size: int = 1, start_from: int = 0):
         """生成完整的数据集"""
         logger.info(f"开始生成完整数据集，输入文件: {question_file}")
         
@@ -428,7 +544,17 @@ MCP工具调用结果: {observation_data}
             logger.error(f"无法读取问题文件: {question_file}")
             return
         
-        logger.info(f"成功读取 {len(question_data)} 个对话，开始补全")
+        original_length = len(question_data)
+        
+        # 如果指定了start_from，则从该位置开始处理
+        if start_from > 0:
+            if start_from >= len(question_data):
+                logger.error(f"起始位置 {start_from} 超出数据范围 {len(question_data)}")
+                return
+            question_data = question_data[start_from:]
+            logger.info(f"从位置 {start_from} 开始处理，剩余 {len(question_data)}/{original_length} 个对话")
+        else:
+            logger.info(f"成功读取 {len(question_data)} 个对话，开始补全")
         
         # 连接MCP客户端
         try:
@@ -443,32 +569,52 @@ MCP工具调用结果: {observation_data}
         
         logger.info(f"总共需要处理 {total_batches} 批数据，每批 {batch_size} 个对话")
         
-        for batch_num in range(1, total_batches + 1):
-            start_idx = (batch_num - 1) * batch_size
-            end_idx = min(start_idx + batch_size, len(question_data))
-            batch_data = question_data[start_idx:end_idx]
-            
-            try:
-                logger.info(f"开始处理第 {batch_num}/{total_batches} 批数据")
-                completed_batch = await self.complete_batch(batch_data, batch_num)
-                all_completed.extend(completed_batch)
+        # 用于存储临时文件名，便于清理
+        temp_files = []
+        
+        try:
+            for batch_num in range(1, total_batches + 1):
+                # 检查是否收到中断信号
+                if hasattr(self, '_interrupted') and self._interrupted:
+                    logger.warning("检测到中断信号，停止处理...")
+                    raise KeyboardInterrupt("程序被信号中断")
                 
-                # 保存中间结果
-                temp_file = f"temp_complete_batch_{batch_num}.json"
-                self.utils.write_json_file(completed_batch, temp_file)
-                logger.info(f"中间结果已保存到: {temp_file}")
+                start_idx = (batch_num - 1) * batch_size
+                end_idx = min(start_idx + batch_size, len(question_data))
+                batch_data = question_data[start_idx:end_idx]
                 
-                progress = len(all_completed) / len(question_data) * 100
-                logger.info(f"总体进度: {len(all_completed)}/{len(question_data)} ({progress:.1f}%)")
-                
-                # 避免API限流
-                if batch_num < total_batches:
-                    logger.info("批次间暂停3秒")
-                    await asyncio.sleep(3)
-                
-            except Exception as e:
-                logger.error(f"处理第 {batch_num} 批数据时出错: {e}")
-                continue
+                try:
+                    logger.info(f"开始处理第 {batch_num}/{total_batches} 批数据")
+                    completed_batch = await self.complete_batch(batch_data, batch_num)
+                    all_completed.extend(completed_batch)
+                    
+                    # 保存中间结果 - 使用包含start_from的文件名
+                    actual_batch_start = start_from + start_idx
+                    temp_file = f"temp_complete_from_{start_from}_batch_{batch_num}_start_{actual_batch_start}.json"
+                    temp_files.append(temp_file)
+                    self.utils.write_json_file(completed_batch, temp_file)
+                    logger.info(f"中间结果已保存到: {temp_file}")
+                    
+                    progress = len(all_completed) / len(question_data) * 100
+                    logger.info(f"总体进度: {len(all_completed)}/{len(question_data)} ({progress:.1f}%)")
+                    
+                    # 避免API限流
+                    if batch_num < total_batches:
+                        logger.info("批次间暂停3秒")
+                        await asyncio.sleep(3)
+                    
+                except Exception as e:
+                    logger.error(f"处理第 {batch_num} 批数据时出错: {e}")
+                    continue
+        
+        except KeyboardInterrupt:
+            logger.warning("检测到程序中断，正在保存已完成的数据...")
+            await self._handle_interruption(all_completed, temp_files, output_file, start_from)
+            raise
+        except Exception as e:
+            logger.error(f"程序执行过程中出现异常: {e}")
+            await self._handle_interruption(all_completed, temp_files, output_file, start_from)
+            raise
         
         # 断开MCP连接
         try:
@@ -477,8 +623,11 @@ MCP工具调用结果: {observation_data}
         except Exception as e:
             logger.warning(f"断开MCP连接时出错: {e}")
         
-        # 保存最终结果
-        self.utils.write_json_file(all_completed, output_file)
+        # 保存最终结果 - 使用增量方式，不覆盖现有数据
+        await self._save_results_incrementally(all_completed, output_file)
+        
+        # 清理临时文件
+        await self._cleanup_temp_files(temp_files)
         
         final_success_rate = len(all_completed) / len(question_data) * 100 if question_data else 0
         logger.info(f"完整数据集生成完成！")
@@ -494,6 +643,7 @@ def parse_args():
     parser.add_argument("--question_file", type=str, help="问题数据文件 (默认从配置文件读取)")
     parser.add_argument("--output_file", type=str, help="输出文件名 (默认从配置文件读取)")
     parser.add_argument("--batch_size", type=int, help="每批处理的对话数量 (默认从配置文件读取)")
+    parser.add_argument("--start_from", type=int, default=None, help="从指定位置开始处理 (默认从配置文件读取)")
     parser.add_argument("--config", type=str, default="config.json", help="配置文件路径 (默认: config.json)")
     parser.add_argument("--api_key", type=str, help="DeepSeek API Key (可选，会覆盖配置文件设置)")
     return parser.parse_args()
@@ -521,7 +671,8 @@ async def main():
     question_file = args.question_file or config.get('completion.default_question_file', "function_calling_dataset_smart.json")
     output_file = args.output_file or config.get('completion.default_output_file', "function_calling_dataset_completed.json")
     batch_size = args.batch_size or config.get('completion.default_batch_size', 1)
-    system_prompt_file = config.get('generation.system_prompt_file', 'prompt-2.txt')
+    start_from = args.start_from if args.start_from is not None else config.get('completion.default_start_from', 0)
+    system_prompt_file = config.get('completion.system_prompt_file', 'prompt-2.txt')
     
     api_key = config.get_api_key()
     logger.info("🚀 开始生成完整的function calling数据集...")
@@ -529,17 +680,35 @@ async def main():
     logger.info(f"📖 输入文件: {question_file}")
     logger.info(f"💾 输出文件: {output_file}")
     logger.info(f"   批次大小: {batch_size}")
+    if start_from > 0:
+        logger.info(f"   起始位置: {start_from}")
     logger.info(f"📝 系统提示词: {system_prompt_file}")
     logger.info(f"🔧 MCP工具: 自动注册所有可用工具")
     
+    # 设置信号处理器
+    generator = None
+    
+    def signal_handler(signum, frame):
+        logger.warning(f"接收到信号 {signum}，正在优雅退出...")
+        if generator:
+            # 这里只能设置标记，实际处理在异步代码中进行
+            generator._interrupted = True
+        print("\n⚠️  程序正在安全退出，请稍候...")
+    
+    # 注册信号处理器
+    signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
+    signal.signal(signal.SIGTERM, signal_handler)  # 终止信号
+    
     try:
         generator = CompleteDatasetGenerator(config)
+        generator._interrupted = False  # 添加中断标记
         
         # 生成完整数据集
         completed_data = await generator.generate_complete_dataset(
             question_file=question_file,
             output_file=output_file,
-            batch_size=batch_size
+            batch_size=batch_size,
+            start_from=start_from
         )
         
         if completed_data:
@@ -549,6 +718,9 @@ async def main():
             logger.error("❌ 完整数据集生成失败")
             print("❌ 完整数据集生成失败")
             
+    except KeyboardInterrupt:
+        logger.info("用户中断程序执行")
+        print("用户中断程序执行")
     except ValueError as e:
         logger.error(f"❌ 配置错误: {e}")
         print(f"❌ 配置错误: {e}")

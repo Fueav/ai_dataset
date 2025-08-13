@@ -23,9 +23,12 @@ class SmartQuestionDatasetGenerator:
         if not api_key:
             raise ValueError("API Key未配置，请检查配置文件或环境变量")
         
+        # 获取总对话数配置
+        total_conversations = self.config.get('generation.default_total_conversations', 6000)
+        
         self.api_client = DeepSeekAPIClient(api_key)
         self.utils = DatasetUtils()
-        self.dedup_manager = DatasetDedupManager()
+        self.dedup_manager = DatasetDedupManager(total_conversations=total_conversations)
         self.output_file = self.config.get('generation.default_output_file', "function_calling_dataset_smart.json")
         self.current_conversations = []
         self._setup_cleanup_handlers()
@@ -210,7 +213,7 @@ class SmartQuestionDatasetGenerator:
         }
         
         user_prompt = tool_prompts.get(tool_name, f"生成{count}个关于{tool_name}的问题")
-        user_prompt += "，注意使用随机生成的地址和哈希参数。"
+        user_prompt += "，注意使用系统提示词里面给的示例地址和哈希参数，并且按照示例格式返回。"
         
         # 调用API生成
         response = self.api_client.call_api(base_system_prompt, user_prompt)
