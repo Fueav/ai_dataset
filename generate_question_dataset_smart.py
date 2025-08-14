@@ -22,11 +22,19 @@ class SmartQuestionDatasetGenerator:
         api_key = self.config.get_api_key()
         if not api_key:
             raise ValueError("API Key未配置，请检查配置文件或环境变量")
+
+        model= self.config.get_model()
+        if not api_key:
+            raise ValueError("Model未配置，请检查配置文件或环境变量")
+
+        base_url = self.config.get_base_url()
+        if not api_key:
+            raise ValueError("Base_url未配置，请检查配置文件或环境变量")
         
         # 获取总对话数配置
         total_conversations = self.config.get('generation.default_total_conversations', 6000)
         
-        self.api_client = DeepSeekAPIClient(api_key)
+        self.api_client = DeepSeekAPIClient(api_key,model,base_url)
         self.utils = DatasetUtils()
         self.dedup_manager = DatasetDedupManager(total_conversations=total_conversations)
         self.output_file = self.config.get('generation.default_output_file', "function_calling_dataset_smart.json")

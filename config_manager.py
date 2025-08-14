@@ -83,6 +83,36 @@ class ConfigManager:
         
         return api_key
     
+    def get_base_url(self) -> str:
+        """获取Base URL"""
+        base_url = self.config.get("api", {}).get("base_url", "")
+        
+        if not base_url:
+            print("⚠️ 配置文件中未找到Base URL")
+            # 尝试从环境变量获取
+            base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+            if base_url != "https://api.deepseek.com":
+                print("✅ 从环境变量 DEEPSEEK_BASE_URL 获取Base URL")
+            else:
+                print("✅ 使用默认Base URL: https://api.deepseek.com")
+        
+        return base_url
+    
+    def get_model(self) -> str:
+        """获取模型名称"""
+        model = self.config.get("api", {}).get("model", "")
+        
+        if not model:
+            print("⚠️ 配置文件中未找到模型名称")
+            # 尝试从环境变量获取
+            model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+            if model != "deepseek-chat":
+                print("✅ 从环境变量 DEEPSEEK_MODEL 获取模型名称")
+            else:
+                print("✅ 使用默认模型: deepseek-chat")
+        
+        return model
+    
     def get_api_config(self) -> Dict[str, Any]:
         """获取API配置"""
         return self.config.get("api", {})

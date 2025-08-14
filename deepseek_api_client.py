@@ -12,8 +12,9 @@ from merlin_mcp_client import MerlinMCPClient
 class DeepSeekAPIClient:
     """DeepSeek API客户端，支持function calling"""
     
-    def __init__(self, api_key: str, base_url: str = "https://aihubmix.com/v1"):
+    def __init__(self, api_key: str, model: str , base_url: str ):
         self.api_key = api_key
+        self.model = model
         self.base_url = base_url
         self.headers = {
             "Authorization": f"Bearer {api_key}",
@@ -23,7 +24,7 @@ class DeepSeekAPIClient:
     async def call_api_with_tools(self, system_prompt: str, user_prompt: str, tools_schema: List[Dict] = None, mcp_client: MerlinMCPClient = None, max_retries: int = 3) -> str:
         """调用deepseek API，支持function calling"""
         payload = {
-            "model": "DeepSeek-V3",
+            "model": self.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -82,7 +83,7 @@ class DeepSeekAPIClient:
                     
                     # 继续对话，包含工具调用结果
                     follow_up_payload = {
-                        "model": "DeepSeek-V3",
+                        "model": self.model,
                         "messages": payload["messages"] + [message] + tool_responses,
                         "temperature": 0.7,
                         "max_tokens": 4096
@@ -130,7 +131,7 @@ class DeepSeekAPIClient:
     async def call_api_with_tools_detailed(self, messages: List[Dict], tools_schema: List[Dict] = None, mcp_client: MerlinMCPClient = None, max_retries: int = 3) -> Dict:
         """调用deepseek API，支持function calling，返回详细信息包括工具调用记录"""
         payload = {
-            "model": "DeepSeek-V3",
+            "model": self.model,
             "messages": messages,
             "temperature": 0.7,
             "max_tokens": 4096
@@ -209,7 +210,7 @@ class DeepSeekAPIClient:
                     
                     # 继续对话，包含工具调用结果
                     follow_up_payload = {
-                        "model": "DeepSeek-V3",
+                        "model": self.model,
                         "messages": payload["messages"] + [message] + tool_responses,
                         "temperature": 0.7,
                         "max_tokens": 4096
@@ -277,7 +278,7 @@ class DeepSeekAPIClient:
     async def generate_complete_conversation(self, messages: List[Dict], tools_schema: List[Dict] = None, mcp_client: MerlinMCPClient = None, max_retries: int = 3, max_tool_rounds: int = 6) -> Dict:
         """生成完整的对话流程，包括function_call和observation记录，支持多轮工具调用"""
         payload = {
-            "model": "DeepSeek-V3",
+            "model": self.model,
             "messages": messages,
             "temperature": 0.7,
             "max_tokens": 4096
@@ -303,7 +304,7 @@ class DeepSeekAPIClient:
                 while tool_round < max_tool_rounds:
                     # 调用API
                     current_payload = {
-                        "model": "DeepSeek-V3",
+                        "model": self.model,
                         "messages": current_messages,
                         "temperature": 0.7,
                         "max_tokens": 4096
@@ -454,7 +455,7 @@ class DeepSeekAPIClient:
     def call_api(self, system_prompt: str, user_prompt: str, max_retries: int = 3) -> str:
         """调用deepseek API，不带function calling"""
         payload = {
-            "model": "DeepSeek-V3",
+            "model": self.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
