@@ -281,7 +281,7 @@ class DeepSeekAPIClient:
             "model": self.model,
             "messages": messages,
             "temperature": 0.7,
-            "max_tokens": 4096
+            "max_tokens": 40960
         }
         
         # 如果有可用工具，添加到请求中
@@ -313,7 +313,8 @@ class DeepSeekAPIClient:
                     if tools_schema:
                         current_payload["tools"] = tools_schema
                         current_payload["tool_choice"] = "auto"
-                    
+                        print("API Payload:")
+                        print(json.dumps(current_payload, indent=2, ensure_ascii=False))
                     response = requests.post(
                         f"{self.base_url}/chat/completions",
                         headers=self.headers,
@@ -323,7 +324,8 @@ class DeepSeekAPIClient:
                     response.raise_for_status()
                     
                     result = response.json()
-                    print(f"API响应结果: {result}")
+                    print("API Payload:")
+                    print(json.dumps(result, indent=2, ensure_ascii=False))
 
                     message = result["choices"][0]["message"]
                     
